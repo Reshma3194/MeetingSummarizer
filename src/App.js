@@ -1,0 +1,746 @@
+import React, { useState, useCallback } from 'react';
+import { FileText, Sparkles, Edit3, Copy, Download, Loader2, CheckCircle, AlertCircle, Eye, EyeOff, Upload, X, File, FileText as FileTextIcon, FileImage, Share2, FileDown, Mic, Volume2 } from 'lucide-react';
+import axios from 'axios';
+import jsPDF from 'jspdf';
+
+function App() {
+  const [transcript, setTranscript] = useState('');
+  const [instruction, setInstruction] = useState('Summarize this transcript in bullet points for a busy executive.');
+  const [summary, setSummary] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedSummary, setEditedSummary] = useState('');
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [showMarkdown, setShowMarkdown] = useState(true);
+  const [uploadedFile, setUploadedFile] = useState(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [audioInfo, setAudioInfo] = useState(null);
+
+  const presetInstructions = [
+    'Summarize this transcript in bullet points for a busy executive.',
+    'Highlight only action items and next steps.',
+    'Create a detailed summary with key discussion points.',
+    'Extract main decisions and outcomes.',
+    'Summarize for technical team members.',
+    'Create a summary suitable for stakeholders.'
+  ];
+
+  // Function to convert plain text to Markdown format
+  const convertToMarkdown = (text) => {
+    if (!text) return '';
+    
+    let markdown = text;
+    
+    // Convert bullet points to proper Markdown lists
+    markdown = markdown.replace(/^[\s]*[-•*]\s+/gm, '- ');
+    
+    // Convert numbered lists
+    markdown = markdown.replace(/^[\s]*(\d+)[\.\)]\s+/gm, '$1. ');
+    
+    // Convert headers (lines that end with colon or are all caps)
+    markdown = markdown.replace(/^([A-Z\s]+):\s*$/gm, '## $1');
+    markdown = markdown.replace(/^([A-Z\s]{3,})\s*$/gm, (match) => {
+      // Skip if it's just a short word or already formatted
+      if (match.trim().length < 3 || match.includes(':')) return match;
+      return `## ${match.trim()}`;
+    });
+    
+    // Convert action items
+    markdown = markdown.replace(/^(Action Item|Next Step|TODO|Task):\s*/gmi, '**$1:** ');
+    
+    // Convert key points
+    markdown = markdown.replace(/^(Key Point|Important|Note|Decision):\s*/gmi, '**$1:** ');
+    
+    // Convert deadlines/dates
+    markdown = markdown.replace(/(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{1,2}-\d{1,2}-\d{2,4})/g, '**$1**');
+    
+    // Convert percentages
+    markdown = markdown.replace(/(\d+%)/g, '**$1**');
+    
+    // Convert email addresses
+    markdown = markdown.replace(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g, '`$1`');
+    
+    // Convert URLs
+    markdown = markdown.replace(/(https?:\/\/[^\s]+)/g, '[$1]($1)');
+    
+    // Add emphasis to important terms
+    markdown = markdown.replace(/\b(urgent|critical|important|priority|deadline|milestone)\b/gi, '**$1**');
+    
+    // Convert sub-bullets (indented items)
+    markdown = markdown.replace(/^[\s]{2,}[-•*]\s+/gm, '  - ');
+    
+    // Add horizontal rules for major sections
+    markdown = markdown.replace(/\n\s*\n\s*\n/g, '\n\n---\n\n');
+    
+    return markdown;
+  };
+
+  // Share functionality
+  const generatePDF = () => {
+    if (!summary) return;
+
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const margin = 20;
+    const maxWidth = pageWidth - (margin * 2);
+
+    // Add title
+    doc.setFontSize(20);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Meeting Summary', margin, 30);
+
+    // Add instruction
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Instruction: ${instruction}`, margin, 45);
+
+    // Add date
+    const currentDate = new Date().toLocaleDateString();
+    doc.text(`Generated on: ${currentDate}`, margin, 55);
+
+    // Add separator
+    doc.line(margin, 65, pageWidth - margin, 65);
+
+    // Add summary content
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'normal');
+    
+    const lines = doc.splitTextToSize(summary, maxWidth);
+    let yPosition = 80;
+    
+    lines.forEach((line) => {
+      if (yPosition > doc.internal.pageSize.getHeight() - 20) {
+        doc.addPage();
+        yPosition = 20;
+      }
+      doc.text(line, margin, yPosition);
+      yPosition += 7;
+    });
+
+    // Save the PDF
+    const filename = `meeting-summary-${currentDate.replace(/\//g, '-')}.pdf`;
+    doc.save(filename);
+    
+    setShowShareModal(false);
+  };
+
+  const generateTXT = () => {
+    if (!summary) return;
+
+    const content = `Meeting Summary
+
+Instruction: ${instruction}
+Generated on: ${new Date().toLocaleDateString()}
+
+${summary}
+
+---
+Generated by Meeting Summarizer AI`;
+
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `meeting-summary-${new Date().toLocaleDateString().replace(/\//g, '-')}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    setShowShareModal(false);
+  };
+
+  // File upload handlers
+  const handleDrag = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleFileSelect(e.dataTransfer.files[0]);
+    }
+  }, []);
+
+  const handleFileSelect = async (file) => {
+    // Validate file type
+    const allowedTypes = [
+      'application/pdf', 
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 
+      'text/plain',
+      'audio/wav',
+      'audio/mpeg',
+      'audio/mp3',
+      'audio/x-wav'
+    ];
+    
+    if (!allowedTypes.includes(file.type)) {
+      setError('Please upload only PDF, DOCX, TXT, WAV, or MP3 files.');
+      return;
+    }
+
+    // Validate file size (max 100MB for audio files)
+    const maxSize = file.type.startsWith('audio/') ? 100 * 1024 * 1024 : 10 * 1024 * 1024;
+    if (file.size > maxSize) {
+      setError(`File size must be less than ${maxSize / (1024 * 1024)}MB.`);
+      return;
+    }
+
+    setUploadedFile(file);
+    setIsUploading(true);
+    setError('');
+    setAudioInfo(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('instruction', instruction);
+
+      const response = await axios.post('/upload-file', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+
+      // Set the extracted content to the transcript field
+      setTranscript(response.data.content);
+      setUploadedFile({ ...file, extractedContent: response.data.content });
+      
+      // If it's an audio file, store additional info
+      if (file.type.startsWith('audio/')) {
+        setAudioInfo({
+          duration: response.data.duration || 0,
+          confidence: response.data.confidence || 0,
+          fileType: response.data.file_type
+        });
+      }
+      
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to process file. Please try again.');
+      setUploadedFile(null);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const removeFile = () => {
+    setUploadedFile(null);
+    setTranscript('');
+    setAudioInfo(null);
+  };
+
+  const getFileIcon = (fileType) => {
+    if (!fileType) {
+      return <File className="w-6 h-6 text-gray-500" />;
+    }
+    
+    if (fileType.startsWith('audio/')) {
+      return <Volume2 className="w-6 h-6 text-purple-500" />;
+    }
+    
+    switch (fileType) {
+      case 'application/pdf':
+        return <FileImage className="w-6 h-6 text-red-500" />;
+      case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+        return <FileTextIcon className="w-6 h-6 text-blue-500" />;
+      case 'text/plain':
+        return <File className="w-6 h-6 text-gray-500" />;
+      default:
+        return <File className="w-6 h-6 text-gray-500" />;
+    }
+  };
+
+  const getFileTypeName = (fileType) => {
+    if (!fileType) {
+      return 'Unknown';
+    }
+    
+    if (fileType.startsWith('audio/')) {
+      if (fileType.includes('wav')) return 'WAV';
+      if (fileType.includes('mp3') || fileType.includes('mpeg')) return 'MP3';
+      return 'Audio';
+    }
+    
+    switch (fileType) {
+      case 'application/pdf':
+        return 'PDF';
+      case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+        return 'DOCX';
+      case 'text/plain':
+        return 'TXT';
+      default:
+        return 'Unknown';
+    }
+  };
+
+  const formatDuration = (seconds) => {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.floor(seconds % 60);
+    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+  };
+
+  const handleGenerateSummary = async () => {
+    if (!transcript.trim()) {
+      setError('Please enter a transcript or upload a file to summarize.');
+      return;
+    }
+
+    setIsLoading(true);
+    setError('');
+    setSummary('');
+
+    try {
+      const response = await axios.post('/summarize', {
+        transcript: transcript.trim(),
+        instruction: instruction.trim()
+      });
+
+      // Convert the generated summary to Markdown
+      const markdownSummary = convertToMarkdown(response.data.summary);
+      setSummary(markdownSummary);
+      setEditedSummary(markdownSummary);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to generate summary. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleEdit = () => {
+    setIsEditing(true);
+    setEditedSummary(summary);
+  };
+
+  const handleSaveEdit = () => {
+    setSummary(editedSummary);
+    setIsEditing(false);
+  };
+
+  const handleCancelEdit = () => {
+    setEditedSummary(summary);
+    setIsEditing(false);
+  };
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(summary);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy text:', err);
+    }
+  };
+
+  const handleDownload = () => {
+    const element = document.createElement('a');
+    const file = new Blob([summary], { type: 'text/markdown' });
+    element.href = URL.createObjectURL(file);
+    element.download = 'meeting-summary.md';
+    document.body.appendChild(element);
+    element.click();
+    document.body.removeChild(element);
+  };
+
+  const handleInstructionChange = (newInstruction) => {
+    setInstruction(newInstruction);
+  };
+
+  // Function to render Markdown preview
+  const renderMarkdownPreview = (text) => {
+    if (!text) return null;
+    
+    // Simple Markdown rendering
+    const html = text
+      .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+      .replace(/^# (.*$)/gim, '<h1>$1</h1>')
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/`(.*?)`/g, '<code>$1</code>')
+      .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      .replace(/^[-*]\s+(.*$)/gim, '<li>$1</li>')
+      .replace(/^(\d+)\.\s+(.*$)/gim, '<li>$2</li>')
+      .replace(/\n\n---\n\n/g, '<hr>')
+      .replace(/\n/g, '<br>');
+    
+    return { __html: html };
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+      {/* Header */}
+      <header className="gradient-bg text-white py-8">
+        <div className="max-w-6xl mx-auto px-4">
+          <div className="text-center">
+            <h1 className="text-4xl font-bold mb-2 flex items-center justify-center gap-3">
+              <Sparkles className="w-10 h-10" />
+              Meeting Summarizer
+            </h1>
+            <p className="text-xl text-blue-100">
+              Transform your meeting transcripts into actionable insights with AI
+            </p>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="max-w-8xl mx-auto px-4 py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
+          {/* Input Section */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* File Upload Section */}
+            <div className="card">
+              <h2 className="text-2xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
+                <Upload className="w-6 h-6 text-primary-600" />
+                Upload Meeting Notes
+              </h2>
+              
+              {!uploadedFile ? (
+                <div
+                  className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
+                    dragActive 
+                      ? 'border-primary-500 bg-primary-50' 
+                      : 'border-gray-300 hover:border-primary-400 hover:bg-gray-50'
+                  }`}
+                  onDragEnter={handleDrag}
+                  onDragLeave={handleDrag}
+                  onDragOver={handleDrag}
+                  onDrop={handleDrop}
+                >
+                  <Upload className="w-12 h-12 mx-auto mb-4 text-gray-400" />
+                  <p className="text-lg font-medium text-gray-700 mb-2">
+                    Drop your file here or click to browse
+                  </p>
+                  <p className="text-sm text-gray-500 mb-4">
+                    Supports PDF, DOCX, TXT, WAV, and MP3 files
+                  </p>
+                  <p className="text-xs text-gray-400 mb-4">
+                    Audio files: max 30 minutes • Documents: max 10MB
+                  </p>
+                  <input
+                    type="file"
+                    id="file-upload"
+                    className="hidden"
+                    accept=".pdf,.docx,.txt,.wav,.mp3"
+                    onChange={(e) => e.target.files[0] && handleFileSelect(e.target.files[0])}
+                  />
+                  <label
+                    htmlFor="file-upload"
+                    className="btn-primary cursor-pointer inline-flex items-center gap-2"
+                  >
+                    <Upload className="w-4 h-4" />
+                    Choose File
+                  </label>
+                </div>
+              ) : (
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      {getFileIcon(uploadedFile.type)}
+                      <div>
+                        <p className="font-medium text-green-800">{uploadedFile.name}</p>
+                        <p className="text-sm text-green-600">
+                          {getFileTypeName(uploadedFile.type)} • {(uploadedFile.size / 1024 / 1024).toFixed(2)} MB
+                        </p>
+                        {audioInfo && (
+                          <p className="text-sm text-purple-600">
+                            Duration: {formatDuration(audioInfo.duration)} • Confidence: {(audioInfo.confidence * 100).toFixed(1)}%
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      onClick={removeFile}
+                      className="text-green-600 hover:text-green-800 p-1"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+                  {uploadedFile.extractedContent && (
+                    <div className="mt-3 p-3 bg-white rounded border">
+                      <p className="text-sm text-gray-600 mb-2">
+                        <strong>Extracted Content Preview:</strong> {uploadedFile.extractedContent.substring(0, 100)}...
+                      </p>
+                      <button
+                        onClick={() => setTranscript(uploadedFile.extractedContent)}
+                        className="text-sm text-primary-600 hover:text-primary-800 underline"
+                      >
+                        Use this content for summarization
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="card">
+              <h2 className="text-2xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
+                <FileText className="w-6 h-6 text-primary-600" />
+                Meeting Transcript
+              </h2>
+              <textarea
+                className="input-field h-64"
+                placeholder="Paste your meeting transcript, call recording, or notes here... or upload a file above"
+                value={transcript}
+                onChange={(e) => setTranscript(e.target.value)}
+              />
+              <p className="text-sm text-gray-500 mt-2">
+                {transcript.length} characters
+              </p>
+            </div>
+
+            <div className="card">
+              <h3 className="text-xl font-semibold text-gray-800 mb-4">
+                Custom Instructions
+              </h3>
+              <textarea
+                className="input-field h-24 mb-4"
+                placeholder="Describe how you want the summary to be generated..."
+                value={instruction}
+                onChange={(e) => setInstruction(e.target.value)}
+              />
+              
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-gray-700">Quick Presets:</p>
+                <div className="flex flex-wrap gap-2">
+                  {presetInstructions.map((preset, index) => (
+                    <button
+                      key={index}
+                      onClick={() => handleInstructionChange(preset)}
+                      className="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full transition-colors duration-200"
+                    >
+                      {preset.length > 40 ? preset.substring(0, 40) + '...' : preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={handleGenerateSummary}
+              disabled={isLoading || !transcript.trim()}
+              className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                  Generating Summary...
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-5 h-5 mr-2" />
+                  Generate Summary
+                </>
+              )}
+            </button>
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center gap-2 text-red-700">
+                <AlertCircle className="w-5 h-5" />
+                {error}
+              </div>
+            )}
+          </div>
+
+          {/* Output Section - now takes full remaining width */}
+          <div className="lg:col-span-3 space-y-6">
+            <div className="card">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-2xl font-semibold text-gray-800">
+                  Generated Summary
+                </h2>
+                {summary && (
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setShowShareModal(true)}
+                      className="btn-secondary flex items-center gap-2"
+                      title="Share Summary"
+                    >
+                      <Share2 className="w-4 h-4" />
+                      {/* Share */}
+                    </button>
+                    <button
+                      onClick={() => setShowMarkdown(!showMarkdown)}
+                      className="btn-secondary flex items-center gap-2"
+                      title={showMarkdown ? "Show Raw Markdown" : "Show Preview"}
+                    >
+                      {showMarkdown ? (
+                        <>
+                          <EyeOff className="w-4 h-4" />
+                          {/* Raw */}
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="w-4 h-4" />
+                          Preview
+                        </>
+                      )}
+                    </button>
+                    <button
+                      onClick={handleEdit}
+                      className="btn-secondary flex items-center gap-2"
+                    >
+                      <Edit3 className="w-4 h-4" />
+                      {/* Edit */}
+                    </button>
+                    <button
+                      onClick={handleCopy}
+                      className="btn-secondary flex items-center gap-2"
+                    >
+                      {copied ? (
+                        <>
+                          <CheckCircle className="w-4 h-4 text-green-600" />
+                          {/* Copied! */}
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-4 h-4" />
+                           
+                        </>
+                      )}
+                    </button>
+                    <button
+                      onClick={handleDownload}
+                      className="btn-secondary flex items-center gap-2"
+                    >
+                      <Download className="w-4 h-4" />
+                      {/* Download */}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {!summary && !isLoading && (
+                <div className="text-center py-16 text-gray-500">
+                  <Sparkles className="w-16 h-16 mx-auto mb-4 text-gray-300" />
+                  <p className="text-lg">Your AI-generated summary will appear here</p>
+                  <p className="text-sm">Paste a transcript, upload a file, and click "Generate Summary" to get started</p>
+                </div>
+              )}
+
+              {isLoading && (
+                <div className="text-center py-16">
+                  <Loader2 className="w-16 h-16 mx-auto mb-4 text-primary-600 animate-spin" />
+                  <p className="text-lg text-gray-600">AI is analyzing your transcript...</p>
+                  <p className="text-sm text-gray-500">This may take a few moments</p>
+                </div>
+              )}
+
+              {summary && !isLoading && (
+                <div className="space-y-4">
+                  {isEditing ? (
+                    <div className="space-y-4">
+                      <textarea
+                        className="input-field h-64 font-mono text-sm"
+                        value={editedSummary}
+                        onChange={(e) => setEditedSummary(e.target.value)}
+                        placeholder="Edit your Markdown summary here..."
+                      />
+                      <div className="flex gap-3">
+                        <button
+                          onClick={handleSaveEdit}
+                          className="btn-primary flex-1"
+                        >
+                          Save Changes
+                        </button>
+                        <button
+                          onClick={handleCancelEdit}
+                          className="btn-secondary flex-1"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="prose max-w-none">
+                      {showMarkdown ? (
+                        <div className="bg-gray-50 rounded-lg p-4">
+                          <div 
+                            className="markdown-content"
+                            dangerouslySetInnerHTML={renderMarkdownPreview(summary)}
+                          />
+                        </div>
+                      ) : (
+                        <div className="bg-gray-900 text-green-400 rounded-lg p-4 font-mono text-sm overflow-x-auto">
+                          <pre className="whitespace-pre-wrap">{summary}</pre>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </main>
+
+      {/* Share Modal */}
+      {showShareModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-semibold text-gray-800">Share Summary</h3>
+              <button
+                onClick={() => setShowShareModal(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+            
+            <p className="text-gray-600 mb-6">
+              Choose how you'd like to share your meeting summary:
+            </p>
+            
+            <div className="space-y-3">
+              <button
+                onClick={generatePDF}
+                className="w-full flex items-center justify-center gap-3 bg-red-600 hover:bg-red-700 text-white font-medium py-3 px-6 rounded-lg transition-colors duration-200"
+              >
+                <FileImage className="w-5 h-5" />
+                Share as PDF
+              </button>
+              
+              <button
+                onClick={generateTXT}
+                className="w-full flex items-center justify-center gap-3 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-6 rounded-lg transition-colors duration-200"
+              >
+                <FileTextIcon className="w-5 h-5" />
+                Share as TXT
+              </button>
+            </div>
+            
+            <div className="mt-6 text-center">
+              <button
+                onClick={() => setShowShareModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Footer */}
+      <footer className="bg-white border-t border-gray-200 py-8 mt-16">
+        <div className="max-w-6xl mx-auto px-4 text-center text-gray-600">
+          <p>&copy; 2024 Meeting Summarizer. Powered by AI technology.</p>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+export default App;
